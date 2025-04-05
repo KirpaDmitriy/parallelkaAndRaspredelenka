@@ -59,5 +59,4 @@ query = parsed_df.writeStream \
 
 query.awaitTermination()
 
-# 9. Завершение SparkSession (выполняется при остановке)
 spark.stop()
