@@ -1,49 +1,63 @@
-import time
+import pyspark
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, sum as spark_sum, from_json
+from pyspark.sql.functions import col, from_json
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType
-import matplotlib.pyplot as plt
+import os
 
-spark = SparkSession.builder.appName("Kafka Spark Streaming").master("local[*]").getOrCreate()
+spark = SparkSession.builder \
+    .appName("KafkaCountryStatistics") \
+    .getOrCreate()
 
 schema = StructType([
     StructField("country", StringType(), True),
-    StructField("amount", IntegerType(), True)
 ])
 
-df = spark.readStream \
+kafka_df = spark.readStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", "localhost:9092") \
-    .option("subscribe", "your-topic-name") \
+    .option("subscribe", "country-stats-topic") \
     .option("startingOffsets", "earliest") \
     .load()
 
-df = df.selectExpr("CAST(value AS STRING) as json") \
-    .select(from_json(col("json"), schema).alias("data")) \
-    .select("data.*")
+parsed_df = kafka_df.select(
+    from_json(col("value").cast("string"), schema).alias("data")
+).select("data.*")
 
-agg_df = df.groupBy("country").agg(spark_sum("amount").alias("total_amount"))
+results = {}
+lock = threading.Lock()
 
-def plot_update(df_pandas):
-    ax.clear()
-    df_pandas.plot(kind='bar', x='country', y='total_amount', ax=ax, color='skyblue')
-    plt.title('Total Amount by Country')
-    plt.ylabel('Amount')
-    plt.xlabel('Country')
-    plt.draw()
-    plt.pause(0.1)
+def process_batch(batch_df, batch_id):
+    with lock:
+        batch_counts = batch_df.groupBy("country").count().collect()
+        
+        for row in batch_counts:
+            country = row["country"]
+            count = row["count"]
+            results[country] = results.get(country, 0) + count
+        
+        draw_ascii_graph(results)
 
-plt.ion()
-fig, ax = plt.subplots()
+def draw_ascii_graph(data, max_width=80, top_countries=13):
+    os.system('cls' if os.name == 'nt' else 'clear')
+    print("\n=== Real-Time Top 13 Countries ===\n")
+    max_count = max(data.values()) if data else 1
+    
+    sorted_data = sorted(data.items(), key=lambda x: x[1], reverse=True)[:top_countries]
+    
+    for country, count in sorted_data:
+        bar_length = int((count / max_count) * max_width)
+        bar = "#" * bar_length
+        print(f"{country:<25} | {bar} ({count})")
+    
+    print("\n" + "=" * 50)
 
-def process_row(batch_df, batch_id):
-    batch_pandas = batch_df.toPandas()
-    print(batch_pandas)  # Для отладки
-    plot_update(batch_pandas)
-
-query = agg_df.writeStream \
-    .outputMode("complete") \
-    .foreachBatch(process_row) \
+query = parsed_df.writeStream \
+    .outputMode("update") \
+    .foreachBatch(process_batch) \
+    .option("checkpointLocation", "/tmp/spark-checkpoint") \
     .start()
 
 query.awaitTermination()
+
+# 9. Завершение SparkSession (выполняется при остановке)
+spark.stop()
